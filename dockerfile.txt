@@ -1,0 +1,311 @@
+# Dockerfile for AI Stock Report Generator
+FROM python:3.11-slim
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements first for better caching
+COPY requirements.txt .
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY . .
+
+# Create necessary directories
+RUN mkdir -p reports data logs templates
+
+# Set environment variables
+ENV PYTHONPATH=/app
+ENV PYTHONUNBUFFERED=1
+
+# Create non-root user for security
+RUN useradd -m -u 1000 stockuser && \
+    chown -R stockuser:stockuser /app
+USER stockuser
+
+# Expose port (if you plan to add a web interface later)
+EXPOSE 8000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD python -c "import stock_report; print('OK')" || exit 1
+
+# Default command
+CMD ["python", "stock_report.py", "--help"]
+
+# =============================================================================
+# docker-compose.yml
+# =============================================================================
+---
+version: '3.8'
+
+services:
+  stock-report-generator:
+    build: .
+    container_name: stock-report-generator
+    environment:
+      # API Keys - set these in your .env file
+      - ALPHA_VANTAGE_API_KEY=${ALPHA_VANTAGE_API_KEY}
+      - FMP_API_KEY=${FMP_API_KEY}
+      - POLYGON_API_KEY=${POLYGON_API_KEY}
+      - NEWS_API_KEY=${NEWS_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - QUANDL_API_KEY=${QUANDL_API_KEY}
+    volumes:
+      # Mount reports directory to persist generated reports
+      - ./reports:/app/reports
+      - ./data:/app/data
+      - ./logs:/app/logs
+      # Mount config files
+      - ./config.json:/app/config.json:ro
+      - ./.env:/app/.env:ro
+    networks:
+      - stock-report-network
+    restart: unless-stopped
+    
+    # Override command for different operations
+    # Uncomment one of these or use docker-compose run with custom command
+    
+    # Generate single report
+    # command: ["python", "stock_report.py", "report", "--symbol", "AAPL"]
+    
+    # Generate batch reports
+    # command: ["python", "batch_reports.py"]
+    
+    # Run scheduled reports (for cron-like behavior)
+    # command: ["python", "stock_report.py", "schedule"]
+
+  # Optional: Redis for caching (uncomment if needed)
+  # redis:
+  #   image: redis:7-alpine
+  #   container_name: stock-report-redis
+  #   networks:
+  #     - stock-report-network
+  #   restart: unless-stopped
+
+  # Optional: PostgreSQL for data storage (uncomment if needed)
+  # postgres:
+  #   image: postgres:15-alpine
+  #   container_name: stock-report-postgres
+  #   environment:
+  #     POSTGRES_DB: stockreports
+  #     POSTGRES_USER: stockuser
+  #     POSTGRES_PASSWORD: ${DB_PASSWORD:-stockpassword}
+  #   volumes:
+  #     - postgres_data:/var/lib/postgresql/data
+  #   networks:
+  #     - stock-report-network
+  #   restart: unless-stopped
+
+networks:
+  stock-report-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+
+# =============================================================================
+# .dockerignore
+# =============================================================================
+---
+# .dockerignore
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+.tox
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+.git
+.mypy_cache
+.pytest_cache
+.hypothesis
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Project specific
+reports/
+data/
+logs/
+*.pdf
+*.json
+.env
+user_config.json
+portfolio.json
+schedule.json
+
+# =============================================================================
+# Docker Usage Instructions
+# =============================================================================
+
+## Building and Running with Docker
+
+### 1. Build the image
+```bash
+docker build -t stock-report-generator .
+```
+
+### 2. Run with environment variables
+```bash
+docker run -e OPENAI_API_KEY=your_key_here \
+           -v $(pwd)/reports:/app/reports \
+           stock-report-generator \
+           python stock_report.py report --symbol AAPL
+```
+
+### 3. Using Docker Compose (Recommended)
+
+Create a `.env` file with your API keys:
+```bash
+ALPHA_VANTAGE_API_KEY=your_key_here
+OPENAI_API_KEY=your_key_here
+NEWS_API_KEY=your_key_here
+# ... etc
+```
+
+Then run:
+```bash
+# Start services
+docker-compose up -d
+
+# Generate a report
+docker-compose run stock-report-generator python stock_report.py report --symbol AAPL
+
+# Generate batch reports
+docker-compose run stock-report-generator python batch_reports.py
+
+# View logs
+docker-compose logs -f stock-report-generator
+
+# Stop services
+docker-compose down
+```
+
+### 4. Scheduled Reports with Cron
+
+Add to your host crontab:
+```bash
+# Run monthly reports on the 1st at 9 AM
+0 9 1 * * cd /path/to/project && docker-compose run --rm stock-report-generator python stock_report.py schedule
+```
+
+### 5. Development Mode
+
+For development with auto-reload:
+```bash
+docker-compose run -v $(pwd):/app stock-report-generator bash
+```
+
+## Production Deployment
+
+### 1. With Docker Swarm
+```bash
+docker swarm init
+docker stack deploy -c docker-compose.yml stock-reports
+```
+
+### 2. With Kubernetes
+```yaml
+# kubernetes-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stock-report-generator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: stock-report-generator
+  template:
+    metadata:
+      labels:
+        app: stock-report-generator
+    spec:
+      containers:
+      - name: stock-report-generator
+        image: stock-report-generator:latest
+        env:
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: api-keys
+              key: openai
+        volumeMounts:
+        - name: reports-volume
+          mountPath: /app/reports
+      volumes:
+      - name: reports-volume
+        persistentVolumeClaim:
+          claimName: reports-pvc
+```
+
+Apply with:
+```bash
+kubectl apply -f kubernetes-deployment.yaml
+```
+
+## Environment Variables
+
+All API keys can be set via environment variables:
+
+| Variable | Description | Required |
+|----------|-------------|----------|
+| `ALPHA_VANTAGE_API_KEY` | Alpha Vantage API key | No |
+| `FMP_API_KEY` | Financial Modeling Prep API key | No |
+| `POLYGON_API_KEY` | Polygon.io API key | No |
+| `NEWS_API_KEY` | News API key | No |
+| `OPENAI_API_KEY` | OpenAI API key | Recommended |
+| `QUANDL_API_KEY` | Quandl API key | No |
+
+## Volume Mounts
+
+| Container Path | Description |
+|----------------|-------------|
+| `/app/reports` | Generated PDF reports |
+| `/app/data` | Cached data files |
+| `/app/logs` | Application logs |
+| `/app/config.json` | Configuration file |
+
+## Health Check
+
+The container includes a health check that verifies the application can import properly.
+
+## Security Notes
+
+- Container runs as non-root user
+- API keys should be passed via environment variables or mounted secrets
+- Use `.dockerignore` to exclude sensitive files
+- Consider using Docker secrets for production deployments
